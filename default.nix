@@ -1,6 +1,7 @@
 {
   pkgs ? (import <nixpkgs> {}).pkgs,
   haskellPackages ? pkgs.haskellPackages }: let env = haskellPackages.ghcWithPackages (p: with p; [
+  ghc-mod
   transformers
   filepath
   directory
