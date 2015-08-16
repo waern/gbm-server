@@ -99,7 +99,7 @@ loadThing id fp txt writeToDisk db = do
     Just xml ->
       case munchItems xml of
         Left msg -> do
-          warning (msg <> " in BGG XML:\n" <> txt)
+          warning (msg <> " in BGG XML: " <> txt)
           return False
         Right [] -> error "impossible"
         Right l@((_, thang) : _) -> do
@@ -115,7 +115,6 @@ thing id db = do
   r <- Network.Wreq.get url
   case r ^. responseStatus . statusCode of
     200 -> do
-      status "Thing query successful"
       let fp = "things" </> show id <.> "xml"
       loadThing id fp (decodeUtf8 $ BL.toStrict $ r ^. responseBody) True db
     _ -> do
@@ -134,9 +133,9 @@ sleep secs = threadDelay (secs * 1000000)
 everything :: Int -> Int -> DB -> IO ()
 everything id skips db =
   if skips == maxSkips then do
-    status "Stop trying to get things from BGG, trying again in 24 hours"
+    status "#### STOP querying BGG, trying again in 24 hours"
     sleep (24 * 60 * 60)
-    status "Getting new things from BGG..."
+    status "#### RESUME querying BGG..."
     everything (id-skips) 0 db
   else do
     let go = catch (thing id db) (\(exn :: HttpException) -> do print exn; sleep 60; go)
@@ -153,7 +152,7 @@ loadThings db = do
   let load (id, fp) = do txt <- Text.IO.readFile fp; loadThing id fp txt False db
   mapM_ load things
   status "Finished loading things from disk"
-  status "Getting new things from BGG..."
+  status "#### START querying BGG..."
   let ids = map (read . takeBaseName) files
   let start = maximum ids + 1
   everything start 0 db
