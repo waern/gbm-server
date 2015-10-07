@@ -47,10 +47,9 @@ data Thing = Thing
   { id :: Int
   , typ :: Text
   , thumbnail :: Text
-  , titles :: [Text]
   } deriving (Show, Generic, ToJSON)
 
-type DB = IORef (Trie [Thing], IntMap Thing)
+type DB = IORef (Trie [(Text, Thing)], IntMap Thing)
 
 thingdir :: FilePath
 thingdir = "things"
@@ -70,7 +69,7 @@ munchName name =
     Nothing -> Left "No value attribute in name element"
     Just s -> Right $! Text.pack s
 
-munchItem :: Element -> Either Text [(ByteString, Thing)]
+munchItem :: Element -> Either Text [(ByteString, (Text, Thing))]
 munchItem item = do
   typ0 <- note "No type attribute in item element" $ findAttr (u "type") item
   str <- note "No id attribute in item element" $ findAttr (u "id") item
@@ -81,11 +80,12 @@ munchItem item = do
     [] -> Left "No names"
     names -> do
       titles <- mapM munchName names
-      let ltitles = map (encodeUtf8 . Text.toCaseFold) titles
-      let assoc = zip ltitles (repeat Thing {id, typ, thumbnail, titles})
+      let things = repeat Thing {id, typ, thumbnail}
+      let toKey = encodeUtf8 . Text.toCaseFold
+      let assoc = [(toKey title, (title, t)) | (title, t) <- zip titles things]
       thumbnail `seq` typ `seq` id `seq` return assoc
 
-munchItems :: Element -> Either Text [(ByteString, Thing)]
+munchItems :: Element -> Either Text [(ByteString, (Text, Thing))]
 munchItems xml =
   case findChildren (u "item") xml of
     [] -> Left "No items"
@@ -102,8 +102,8 @@ loadThing id fp txt writeToDisk db = do
           warning (msg <> " in BGG XML: " <> txt)
           return False
         Right [] -> error "impossible"
-        Right l@((_, thang) : _) -> do
-          let trie = Trie.fromList [(name, [t]) | (name, t) <- l, typ t == "boardgame"]
+        Right l@((_, (_, thang)) : _) -> do
+          let trie = Trie.fromList [(name, [x]) | (name, x@(_, t)) <- l, typ t == "boardgame"]
           modifyIORef' db (\(t, m) -> (Trie.mergeBy (\a b -> Just (a ++ b)) t trie, IntMap.insert id thang m))
           when writeToDisk (Text.IO.writeFile fp txt)
           return True
@@ -163,9 +163,8 @@ autocomplete db = do
   callback <- Scotty.param "callback"
   let bytestring = encodeUtf8 string
   (trie, _) <- liftIO $ readIORef db
-  let match s = string `Text.isPrefixOf` Text.toCaseFold s
   let things = concat $ Trie.elems $ Trie.submap bytestring trie
-  let completions = nub [(title, id t) | t <- things, title <- titles t, match title]
+  let completions = map (\(title, t) -> (title, id t)) things
   let array = LazyText.toLazyText . Aeson.encodeToTextBuilder . Aeson.toJSON $ completions
   let js = callback <> "(" <> array <> ")"
   Scotty.status ok200
