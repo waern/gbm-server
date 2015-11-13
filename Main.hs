@@ -13,7 +13,7 @@ import Control.Lens hiding ((<.>))
 import Control.Logging
 import Control.Monad
 import Control.Monad.IO.Class
-import Data.IntMap (IntMap, (!))
+import Data.IntMap.Strict (IntMap)
 import Data.IORef
 import Data.List
 import Data.Maybe
@@ -41,7 +41,7 @@ import qualified Data.Text.IO as Text.IO
 import qualified Data.Text.Lazy.Builder as LazyText
 import qualified Data.Trie as Trie
 import qualified Web.Scotty as Scotty
-import qualified Data.IntMap as IntMap
+import qualified Data.IntMap.Strict as IntMap
 
 data Thing = Thing
   { id :: Int
@@ -91,6 +91,13 @@ munchItems xml =
     [] -> Left "No items"
     items -> concat <$> mapM munchItem items
 
+boardGame :: Thing -> Bool
+boardGame t =
+  case typ t of
+    "boardgame" -> True
+    "boardgameexpansion" -> True
+    _ -> False
+
 loadThing :: Int -> FilePath -> Text -> Bool -> DB -> IO Bool
 loadThing id fp txt writeToDisk db = do
   status ("Loading " <> Text.pack (show id))
@@ -103,13 +110,13 @@ loadThing id fp txt writeToDisk db = do
           return False
         Right [] -> error "impossible"
         Right l@((_, (_, thang)) : _) -> do
-          let trie = Trie.fromList [(name, [x]) | (name, x@(_, t)) <- l, typ t == "boardgame"]
+          let trie = Trie.fromList [(name, [x]) | (name, x@(_, t)) <- l, boardGame t]
           modifyIORef' db (\(t, m) -> (Trie.mergeBy (\a b -> Just (a ++ b)) t trie, IntMap.insert id thang m))
           when writeToDisk (Text.IO.writeFile fp txt)
           return True
 
-thing :: Int -> DB -> IO Bool
-thing id db = do
+fetchThing :: Int -> DB -> IO Bool
+fetchThing id db = do
   status $ "Sending thing query to BGG: " <> Text.pack (show id)
   let url = "http://www.boardgamegeek.com/xmlapi2/thing?id=" ++ show id
   r <- Network.Wreq.get url
@@ -122,6 +129,16 @@ thing id db = do
       warning $ "BGG API returned error: " <> msg
       return False
 
+fetchRetryThing :: Int -> DB -> IO Bool
+fetchRetryThing id db =
+  catch
+    (fetchThing id db)
+    (\(exn :: HttpException) -> do
+      print exn;
+      sleep 60;
+      fetchRetryThing id db
+    )
+
 -- Number of consecutive IDs yielding empty BGG responses such that
 -- we consider the DB exhausted
 maxSkips :: Int
@@ -130,32 +147,55 @@ maxSkips = 100
 sleep :: Int -> IO ()
 sleep secs = threadDelay (secs * 1000000)
 
-everything :: Int -> Int -> DB -> IO ()
-everything id skips db =
-  if skips == maxSkips then do
-    status "#### STOP querying BGG, trying again in 24 hours"
-    sleep (24 * 60 * 60)
-    status "#### RESUME querying BGG..."
-    everything (id-skips) 0 db
-  else do
-    let go = catch (thing id db) (\(exn :: HttpException) -> do print exn; sleep 60; go)
-    ok <- go
-    everything (id + 1) (if ok then 0 else skips+1) db
+fetchNew :: Int -> Int -> DB -> IO ()
+fetchNew id skips db
+  | skips == maxSkips = do
+      status "#### STOP querying BGG, trying again in 24 hours"
+      sleep (24 * 60 * 60)
+      fetchNew (id-skips) 0 db
+  | otherwise = do
+      status "#### START querying BGG for new things..."
+      ok <- fetchRetryThing id db
+      fetchNew (id + 1) (if ok then 0 else skips+1) db
+
+thingFiles :: IO [(Int, FilePath)]
+thingFiles = do
+  filepaths <- getDirectoryContents thingdir
+  let files = filter ((==) ".xml" . takeExtension) filepaths
+  return $ sort [(read $ takeBaseName fp, "things" </> fp) | fp <- files]
+
+missing :: [Int] -> [Int]
+missing ids =
+  let f (groups, last_id) id
+        | id - last_id > 1 = ([last_id+1..id-1] : groups, id)
+        | otherwise = (groups, id)
+  in
+  let (groups, _) = foldl' f ([], (-1)) ids in
+  concat groups
+
+fetchMissing :: DB -> IO ()
+fetchMissing db = do
+  status "#### START re-querying BGG for \"missing\" things..."
+  things <- thingFiles
+  let ids = map fst things
+  mapM_ (\id -> fetchRetryThing id db) (missing ids)
+  status "#### STOP querying BGG for \"missing\" things, trying again in 48 hours"
+  sleep (48 * 60 * 60)
+  fetchMissing db
 
 loadThings :: DB -> IO ()
 loadThings db = do
   createDirectoryIfMissing False thingdir
-  filepaths <- getDirectoryContents thingdir
-  let files = filter ((==) ".xml" . takeExtension) filepaths
-  let things = sort [(read $ takeBaseName fp, "things" </> fp) | fp <- files]
+  things <- thingFiles
   status "Loading things from disk..."
   let load (id, fp) = do txt <- Text.IO.readFile fp; loadThing id fp txt False db
   mapM_ load things
   status "Finished loading things from disk"
-  status "#### START querying BGG..."
-  let ids = map (read . takeBaseName) files
-  let start = maximum ids + 1
-  everything start 0 db
+  let ids = map fst things
+  let start = if null ids then 0 else last ids + 1
+  -- do fetching of new games and "missing" games in parallel
+  _ <- forkIO (fetchMissing db)
+  fetchNew start 0 db
 
 autocomplete :: DB -> Scotty.ActionM ()
 autocomplete db = do
@@ -176,7 +216,9 @@ describe db = do
   ids <- Scotty.param "ids"
   callback <- Scotty.param "callback"
   (_, m) <- liftIO $ readIORef db
-  let l = [m ! id | id <- ids]
+  -- frontend should not show thumbnails with empty URL
+  let lkp id = fromMaybe (Thing {id, typ = "", thumbnail = ""}) (IntMap.lookup id m)
+  let l = map lkp ids
   let array = LazyText.toLazyText . Aeson.encodeToTextBuilder . Aeson.toJSON $ l
   let js = callback <> "(" <> array <> ")"
   Scotty.status ok200
