@@ -10,7 +10,7 @@ let gbm-server = pkgs.haskellPackages.callPackage ./default.nix {}; in
 
   systemd.services.gbm-server = {
     environment = {
-      GBM_SERVER_THING_DIR = "/root/gbm-server/things";
+      GBM_SERVER_THING_DIR = "/root/things";
     };
 
     serviceConfig = {
