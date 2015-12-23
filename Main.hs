@@ -52,9 +52,6 @@ data Thing = Thing
 
 type DB = IORef (Trie [(Text, Thing)], IntMap Thing)
 
-thingdir :: FilePath
-thingdir = "things"
-
 status :: Text -> IO ()
 status msg = do log msg; putStrLn (Text.unpack msg)
 
@@ -159,8 +156,8 @@ fetchNew id skips db
       ok <- fetchRetryThing id db
       fetchNew (id + 1) (if ok then 0 else skips+1) db
 
-thingFiles :: IO [(Int, FilePath)]
-thingFiles = do
+thingFiles :: FilePath -> IO [(Int, FilePath)]
+thingFiles thingdir = do
   filepaths <- getDirectoryContents thingdir
   let files = filter ((==) ".xml" . takeExtension) filepaths
   return $ sort [(read $ takeBaseName fp, "things" </> fp) | fp <- files]
@@ -174,20 +171,20 @@ missing ids =
   let (groups, _) = foldl' f ([], (-1)) ids in
   concat groups
 
-fetchMissing :: DB -> IO ()
-fetchMissing db = do
+fetchMissing :: FilePath -> DB -> IO ()
+fetchMissing thingdir db = do
   status "#### START re-querying BGG for \"missing\" things..."
-  things <- thingFiles
+  things <- thingFiles thingdir
   let ids = map fst things
   mapM_ (\id -> fetchRetryThing id db) (missing ids)
   status "#### STOP querying BGG for \"missing\" things, trying again in 48 hours"
   sleep (48 * 60 * 60)
-  fetchMissing db
+  fetchMissing thingdir db
 
-loadThings :: DB -> IO ()
-loadThings db = do
+loadThings :: FilePath -> DB -> IO ()
+loadThings thingdir db = do
   createDirectoryIfMissing False thingdir
-  things <- thingFiles
+  things <- thingFiles thingdir
   status "Loading things from disk..."
   let load (id, fp) = do txt <- Text.IO.readFile fp; loadThing id fp txt False db
   mapM_ load things
@@ -195,7 +192,7 @@ loadThings db = do
   let ids = map fst things
   let start = if null ids then 0 else last ids + 1
   -- do fetching of new games and "missing" games in parallel
-  _ <- forkIO (fetchMissing db)
+  _ <- forkIO (fetchMissing thingdir db)
   fetchNew start 0 db
 
 autocomplete :: DB -> Scotty.ActionM ()
@@ -234,14 +231,14 @@ application db =
     Scotty.get "/describe" (describe db)
 
 main :: IO ()
-main =
-  withStdoutLogging $ do
-    t <- newIORef (Trie.empty, IntMap.empty)
-    _ <- forkIO (loadThings t)
-    app <- application t
-    exePath <- getExecutablePath
-    let pkgPath = takeDirectory (takeDirectory exePath)
-    let certPath = pkgPath </> "certificate.pem"
-    let keyPath = pkgPath </> "key.pem"
-    let settings = tlsSettings certPath keyPath
-    runTLS settings (setPort 443 defaultSettings) app
+main = withStdoutLogging $ do
+  thingdir <- getEnv "GBM_SERVER_THING_DIR"
+  t <- newIORef (Trie.empty, IntMap.empty)
+  _ <- forkIO (loadThings thingdir t)
+  app <- application t
+  exePath <- getExecutablePath
+  let pkgPath = takeDirectory (takeDirectory exePath)
+  let certPath = pkgPath </> "certificate.pem"
+  let keyPath = pkgPath </> "key.pem"
+  let settings = tlsSettings certPath keyPath
+  runTLS settings (setPort 443 defaultSettings) app
