@@ -32,6 +32,7 @@ import Network.Wai.Middleware.Gzip
 import Network.Wreq hiding (auth)
 import Prelude hiding (id, log)
 import System.Directory
+import System.Environment
 import System.FilePath
 import Text.XML.Light
 import Data.ByteString (ByteString)
@@ -234,8 +235,13 @@ application db =
 
 main :: IO ()
 main =
-  withFileLogging "log.txt" $ do
+  withStdoutLogging $ do
     t <- newIORef (Trie.empty, IntMap.empty)
     _ <- forkIO (loadThings t)
     app <- application t
-    runTLS defaultTlsSettings (setPort 443 defaultSettings) app
+    exePath <- getExecutablePath
+    let pkgPath = takeDirectory (takeDirectory exePath)
+    let certPath = pkgPath </> "certificate.pem"
+    let keyPath = pkgPath </> "key.pem"
+    let settings = tlsSettings certPath keyPath
+    runTLS settings (setPort 443 defaultSettings) app
