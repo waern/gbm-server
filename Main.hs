@@ -113,28 +113,28 @@ loadThing id fp txt writeToDisk db = do
           when writeToDisk (Text.IO.writeFile fp txt)
           return True
 
-fetchThing :: Int -> DB -> IO Bool
-fetchThing id db = do
+fetchThing :: FilePath -> Int -> DB -> IO Bool
+fetchThing thingdir id db = do
   status $ "Sending thing query to BGG: " <> Text.pack (show id)
   let url = "http://www.boardgamegeek.com/xmlapi2/thing?id=" ++ show id
   r <- Network.Wreq.get url
   case r ^. responseStatus . statusCode of
     200 -> do
-      let fp = "things" </> show id <.> "xml"
+      let fp = thingdir </> show id <.> "xml"
       loadThing id fp (decodeUtf8 $ BL.toStrict $ r ^. responseBody) True db
     _ -> do
       let msg = Text.pack $ show (r ^. responseStatus)
       warning $ "BGG API returned error: " <> msg
       return False
 
-fetchRetryThing :: Int -> DB -> IO Bool
-fetchRetryThing id db =
+fetchRetryThing :: FilePath -> Int -> DB -> IO Bool
+fetchRetryThing thingdir id db =
   catch
-    (fetchThing id db)
+    (fetchThing thingdir id db)
     (\(exn :: HttpException) -> do
       print exn;
       sleep 60;
-      fetchRetryThing id db
+      fetchRetryThing thingdir id db
     )
 
 -- Number of consecutive IDs yielding empty BGG responses such that
@@ -145,22 +145,22 @@ maxSkips = 100
 sleep :: Int -> IO ()
 sleep secs = threadDelay (secs * 1000000)
 
-fetchNew :: Int -> Int -> DB -> IO ()
-fetchNew id skips db
+fetchNew :: FilePath -> Int -> Int -> DB -> IO ()
+fetchNew thingdir id skips db
   | skips == maxSkips = do
       status "#### STOP querying BGG, trying again in 24 hours"
       sleep (24 * 60 * 60)
-      fetchNew (id-skips) 0 db
+      fetchNew thingdir (id-skips) 0 db
   | otherwise = do
       status "#### START querying BGG for new things..."
-      ok <- fetchRetryThing id db
-      fetchNew (id + 1) (if ok then 0 else skips+1) db
+      ok <- fetchRetryThing thingdir id db
+      fetchNew thingdir (id + 1) (if ok then 0 else skips+1) db
 
 thingFiles :: FilePath -> IO [(Int, FilePath)]
 thingFiles thingdir = do
   filepaths <- getDirectoryContents thingdir
   let files = filter ((==) ".xml" . takeExtension) filepaths
-  return $ sort [(read $ takeBaseName fp, "things" </> fp) | fp <- files]
+  return $ sort [(read $ takeBaseName fp, thingdir </> fp) | fp <- files]
 
 missing :: [Int] -> [Int]
 missing ids =
@@ -176,7 +176,7 @@ fetchMissing thingdir db = do
   status "#### START re-querying BGG for \"missing\" things..."
   things <- thingFiles thingdir
   let ids = map fst things
-  mapM_ (\id -> fetchRetryThing id db) (missing ids)
+  mapM_ (\id -> fetchRetryThing thingdir id db) (missing ids)
   status "#### STOP querying BGG for \"missing\" things, trying again in 48 hours"
   sleep (48 * 60 * 60)
   fetchMissing thingdir db
@@ -193,7 +193,7 @@ loadThings thingdir db = do
   let start = if null ids then 0 else last ids + 1
   -- do fetching of new games and "missing" games in parallel
   _ <- forkIO (fetchMissing thingdir db)
-  fetchNew start 0 db
+  fetchNew thingdir start 0 db
 
 autocomplete :: DB -> Scotty.ActionM ()
 autocomplete db = do
